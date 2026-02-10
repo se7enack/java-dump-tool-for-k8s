@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Java Pod Dumps</title>
+
+  <style>
+    :root {
+      --panel: #111827;
+      --border: #2d3748;
+      --text: #e5e7eb;
+      --muted: #9ca3af;
+      --accent: #3b82f6;
+      --radius: 10px;
+    }
+
+    body {
+      margin: 0;
+      padding: 32px;
+      font-family: system-ui, sans-serif;
+      background: #020617;
+      color: var(--text);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0 10px;
+    }
+
+    th {
+      font-size: 12px;
+      text-transform: uppercase;
+      color: var(--muted);
+      text-align: left;
+      padding: 8px 12px;
+    }
+
+    td {
+      background: var(--panel);
+      padding: 14px 12px;
+      border: 1px solid var(--border);
+    }
+
+    .status-badge {
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      background: #064e3b;
+      color: #6ee7b7;
+    }
+
+    .actions {
+      display: flex;
+      gap: 16px;
+      align-items: flex-start;
+    }
+
+    .action {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      min-width: 120px;
+    }
+
+    button, select {
+      background: var(--accent);
+      border: none;
+      border-radius: var(--radius);
+      padding: 6px 10px;
+      color: white;
+      cursor: pointer;
+    }
+
+    select {
+      background: #1f2937;
+    }
+
+    button:disabled {
+      background: #374151;
+      cursor: not-allowed;
+    }
+
+    .status {
+      font-size: 12px;
+      color: var(--muted);
+      min-height: 14px;
+    }
+  </style>
+
+  <script>
+    async function runDump(btn, payload) {
+      document.querySelectorAll("button").forEach(b => b.disabled = true);
+      const status = btn.parentElement.querySelector(".status");
+      status.textContent = "Running…";
+
+      try {
+        const resp = await fetch("/dump", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams(payload)
+        });
+
+        if (!resp.ok) {
+          throw new Error("Dump failed");
+        }
+
+        const blob = await resp.blob();
+        const cd = resp.headers.get("Content-Disposition");
+        const filename = cd?.split("filename=")[1]?.replaceAll('"', "") || "dump";
+
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      } finally {
+        document.querySelectorAll("button").forEach(b => b.disabled = false);
+        status.textContent = "";
+      }
+    }
+
+    async function startJfr(btn, pod, namespace, container) {
+      document.querySelectorAll("button").forEach(b => b.disabled = true);
+
+      const wrapper = btn.parentElement;
+      const status = wrapper.querySelector(".status");
+      const duration = wrapper.querySelector("select").value;
+
+      const startResp = await fetch("/jfr/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ pod, namespace, container, duration })
+      });
+
+      const { job_id } = await startResp.json();
+
+      const poll = setInterval(async () => {
+        const s = await fetch(`/jfr/status/${job_id}`).then(r => r.json());
+
+        if (s.status === "recording") {
+          status.textContent = `Recording… ${s.remaining}s left`;
+        } else if (s.status === "ready") {
+          clearInterval(poll);
+          status.textContent = "Downloading…";
+
+          const d = await fetch(`/jfr/download/${job_id}`);
+          const blob = await d.blob();
+          const cd = d.headers.get("Content-Disposition");
+          const filename = cd?.split("filename=")[1]?.replaceAll('"', "") || "recording.jfr";
+
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+
+          document.querySelectorAll("button").forEach(b => b.disabled = false);
+          status.textContent = "";
+        }
+      }, 1000);
+    }
+  </script>
+</head>
+
+<body>
+
+<h2>Pods in namespace: {{ namespace }}</h2>
+
+<form method="get">
+  <select name="namespace">
+    {% for ns in namespaces %}
+      <option value="{{ ns }}" {% if ns == namespace %}selected{% endif %}>{{ ns }}</option>
+    {% endfor %}
+  </select>
+  <button type="submit">Load</button>
+</form>
+
+<table>
+  <tr>
+    <th>Pod</th>
+    <th>Status</th>
+    <th>Actions</th>
+  </tr>
+
+  {% for pod in pods %}
+  <tr>
+    <td>{{ pod.metadata.name }}</td>
+    <td><span class="status-badge">{{ pod.status.phase }}</span></td>
+
+    <td>
+      <div class="actions">
+
+        <div class="action">
+          <button onclick="runDump(this,{
+            pod:'{{ pod.metadata.name }}',
+            namespace:'{{ namespace }}',
+            container:'{{ pod.spec.containers[0].name }}',
+            dump_type:'thread'
+          })">Thread</button>
+          <div class="status"></div>
+        </div>
+
+        <div class="action">
+          <button onclick="runDump(this,{
+            pod:'{{ pod.metadata.name }}',
+            namespace:'{{ namespace }}',
+            container:'{{ pod.spec.containers[0].name }}',
+            dump_type:'heap'
+          })">Heap</button>
+          <div class="status"></div>
+        </div>
+
+        <div class="action">
+          <button onclick="startJfr(this,
+            '{{ pod.metadata.name }}',
+            '{{ namespace }}',
+            '{{ pod.spec.containers[0].name }}'
+          )">JFR</button>
+
+          <select>
+            <option value="60" selected>60s (1 min)</option>
+            <option value="300">300s (5 min)</option>
+            <option value="600">600s (10 min)</option>
+          </select>
+
+          <div class="status"></div>
+        </div>
+
+      </div>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+
+</body>
+</html>
