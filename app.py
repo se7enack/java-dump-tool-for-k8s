@@ -16,6 +16,67 @@ v1 = client.CoreV1Api()
 
 JFR_JOBS = {}
 
+
+def has_shell(pod, namespace, container):
+    try:
+        stream(
+            v1.connect_get_namespaced_pod_exec,
+            pod,
+            namespace,
+            container=container,
+            command=["sh", "-c", "echo ok"],
+            stdout=True,
+            stderr=True,
+            stdin=False,
+            tty=False,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def has_jvm(pod, namespace, container):
+    try:
+        resp = stream(
+            v1.connect_get_namespaced_pod_exec,
+            pod,
+            namespace,
+            container=container,
+            command=["which", "jcmd"],
+            stdout=True,
+            stderr=True,
+            stdin=False,
+            tty=False,
+            _preload_content=True,
+        )
+        # 'resp' is stdout as string
+        if resp.strip():  # non-empty output = jcmd exists
+            return True
+        else:
+            return False
+    except Exception:
+        return False
+
+
+def has_cat(pod, namespace, container):
+    try:
+        stream(
+            v1.connect_get_namespaced_pod_exec,
+            pod,
+            namespace,
+            container=container,
+            command=["which", "cat"],
+            stdout=True,
+            stderr=True,
+            stdin=False,
+            tty=False,
+            _preload_content=True,
+        )
+        return True
+    except Exception:
+        return False
+
+
 @app.route("/", methods=["GET"])
 def index():
     namespace = request.args.get("namespace", "default")
@@ -34,8 +95,20 @@ def dump():
     pod = request.form["pod"]
     namespace = request.form["namespace"]
     container = request.form["container"]
-    dump_type = request.form.get("dump_type", "thread")
 
+    if not has_shell(pod, namespace, container):
+        return "Pod has no shell, cannot run JVM commands", 400
+
+    if not has_jvm(pod, namespace, container):
+        return "Pod has no JVM", 400
+
+    if not has_cat(pod, namespace, container):
+        return jsonify({
+            "status": "error",
+            "message": "Pod cannot run cat"
+        }), 400  
+
+    dump_type = request.form.get("dump_type", "thread")
     ts = datetime.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
     pid = "1"
 
@@ -132,8 +205,20 @@ def jfr_start():
     pod = request.form["pod"]
     namespace = request.form["namespace"]
     container = request.form["container"]
-    duration = int(request.form["duration"])
 
+    if not has_shell(pod, namespace, container):
+        return "Pod has no shell, cannot run JVM commands", 400
+
+    if not has_jvm(pod, namespace, container):
+        return "Pod has no JVM", 400
+
+    if not has_cat(pod, namespace, container):
+        return jsonify({
+            "status": "error",
+            "message": "Pod cannot run cat"
+        }), 400  
+
+    duration = int(request.form["duration"])
     job_id = str(uuid.uuid4())
     ts = datetime.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
     jfr_path = f"/tmp/recording-{ts}.jfr"
