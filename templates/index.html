@@ -85,14 +85,15 @@
       font-size: 12px;
       color: var(--muted);
       min-height: 14px;
+      word-break: break-word;
     }
   </style>
 
   <script>
     async function runDump(btn, payload) {
-      document.querySelectorAll("button").forEach(b => b.disabled = true);
       const status = btn.parentElement.querySelector(".status");
       status.textContent = "Running…";
+      btn.disabled = true;
 
       try {
         const resp = await fetch("/dump", {
@@ -102,7 +103,16 @@
         });
 
         if (!resp.ok) {
-          throw new Error("Dump failed");
+          let msg = "Dump failed";
+          const bodyText = await resp.text();
+          try {
+            const data = JSON.parse(bodyText);
+            if (data.message) msg = data.message;
+          } catch {
+            if (bodyText) msg = bodyText;
+          }
+          status.textContent = msg;
+          return;
         }
 
         const blob = await resp.blob();
@@ -115,50 +125,90 @@
         document.body.appendChild(a);
         a.click();
         a.remove();
+
+      } catch (err) {
+        status.textContent = "Error: " + err.message;
       } finally {
-        document.querySelectorAll("button").forEach(b => b.disabled = false);
-        status.textContent = "";
+        btn.disabled = false;
+        if (status.textContent === "Running…") status.textContent = "";
       }
     }
 
     async function startJfr(btn, pod, namespace, container) {
-      document.querySelectorAll("button").forEach(b => b.disabled = true);
-
       const wrapper = btn.parentElement;
       const status = wrapper.querySelector(".status");
       const duration = wrapper.querySelector("select").value;
 
-      const startResp = await fetch("/jfr/start", {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({ pod, namespace, container, duration })
-      });
+      status.textContent = "Starting…";
+      btn.disabled = true;
 
-      const { job_id } = await startResp.json();
+      let job_id = null;
+      try {
+        const startResp = await fetch("/jfr/start", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({ pod, namespace, container, duration })
+        });
 
+        if (!startResp.ok) {
+          let msg = "Failed to start JFR";
+          const bodyText = await startResp.text();
+          try {
+            const data = JSON.parse(bodyText);
+            if (data.message) msg = data.message;
+          } catch {
+            if (bodyText) msg = bodyText;
+          }
+          status.textContent = msg;
+          return;
+        }
+
+        const data = await startResp.json();
+        job_id = data.job_id;
+
+      } catch (err) {
+        status.textContent = "Error: " + err.message;
+        return;
+      }
+
+      // Polling for status
       const poll = setInterval(async () => {
-        const s = await fetch(`/jfr/status/${job_id}`).then(r => r.json());
+        try {
+          const sResp = await fetch(`/jfr/status/${job_id}`);
+          if (!sResp.ok) {
+            clearInterval(poll);
+            const bodyText = await sResp.text();
+            status.textContent = bodyText || "JFR job not found";
+            btn.disabled = false;
+            return;
+          }
 
-        if (s.status === "recording") {
-          status.textContent = `Recording… ${s.remaining}s left`;
-        } else if (s.status === "ready") {
+          const s = await sResp.json();
+          if (s.status === "recording") {
+            status.textContent = `Recording… ${s.remaining}s left`;
+          } else if (s.status === "ready") {
+            clearInterval(poll);
+            status.textContent = "Downloading…";
+
+            const d = await fetch(`/jfr/download/${job_id}`);
+            const blob = await d.blob();
+            const cd = d.headers.get("Content-Disposition");
+            const filename = cd?.split("filename=")[1]?.replaceAll('"', "") || "recording.jfr";
+
+            const a = document.createElement("a");
+            a.href = URL.createObjectURL(blob);
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+
+            status.textContent = "";
+            btn.disabled = false;
+          }
+        } catch (err) {
           clearInterval(poll);
-          status.textContent = "Downloading…";
-
-          const d = await fetch(`/jfr/download/${job_id}`);
-          const blob = await d.blob();
-          const cd = d.headers.get("Content-Disposition");
-          const filename = cd?.split("filename=")[1]?.replaceAll('"', "") || "recording.jfr";
-
-          const a = document.createElement("a");
-          a.href = URL.createObjectURL(blob);
-          a.download = filename;
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
-
-          document.querySelectorAll("button").forEach(b => b.disabled = false);
-          status.textContent = "";
+          status.textContent = "Error: " + err.message;
+          btn.disabled = false;
         }
       }, 1000);
     }
