@@ -39,3 +39,5 @@ python3 ./app.py
 
 ## Screenshot:
 <img width="826" height="422" alt="Screenshot" src="https://github.com/user-attachments/assets/85cf3eb4-cb44-4d09-9389-cf663c1141db" />
+
+![](https://komarev.com/ghpvc/?username=se7enack&style=pixel)
